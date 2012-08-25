@@ -55,7 +55,7 @@ GOVUK.Insights.TwitterCollector = function () {
     }
 
     var publish = function (amqp_topic, message) {
-        $log.debug("Publish tweet {} to {}", message.payload.id, amqp_topic);
+        $log.debug("Publish tweet {} to {}", message.payload.tweet_id, amqp_topic);
         amqp_exchange.publish(amqp_topic, message);
     };
 
@@ -95,8 +95,8 @@ GOVUK.Insights.TwitterCollector = function () {
         var payload = {
             tweet_id:tweet.id_str,
             type:type,
-            user_id:tweet.from_user_id_str || tweet.user.id,
-            username:tweet.from_user || tweet.user.name,
+            user_id:tweet.from_user_id_str || tweet.user.id_str,
+            username:tweet.from_user || tweet.user.screen_name,
             text:tweet.text,
             geo:tweet.geo,
             coordinates:tweet.coordinates,
