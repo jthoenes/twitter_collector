@@ -95,8 +95,8 @@ GOVUK.Insights.TwitterCollector = function () {
         var payload = {
             tweet_id:tweet.id_str,
             type:type,
-            user_id:tweet.from_user_id_str,
-            username:tweet.from_user,
+            user_id:tweet.from_user_id_str || tweet.user.id,
+            username:tweet.from_user || tweet.user.name,
             text:tweet.text,
             geo:tweet.geo,
             coordinates:tweet.coordinates,
