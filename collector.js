@@ -20,6 +20,7 @@ GOVUK.Insights.TwitterCollector = function () {
     var twitter = undefined;
     var amqp_exchange = undefined;
     var amqp_connection = undefined;
+    var url_store = {};
 
     var create_twitter = function () {
         $log.debug("Connecting to Twitter ...");
@@ -145,14 +146,21 @@ GOVUK.Insights.TwitterCollector = function () {
     var resolve_url = function (url) {
         var deferred = Q.defer();
         if (url != null) {
-            request({ method:"HEAD", url:url, followAllRedirects:true },
-                function (error, response) {
-                    if (error) {
-                        deferred.reject(undefined);
-                    } else {
-                        deferred.resolve(response);
-                    }
-                });
+            if (url_store[url]) {
+                $log.debug("Using cache for {}.", url);
+                deferred.resolve(url_store[url]);
+            } else {
+                $log.debug("Loading {} from server.", url);
+                request({ method:"HEAD", url:url, followAllRedirects:true },
+                    function (error, response) {
+                        if (error) {
+                            deferred.reject(undefined);
+                        } else {
+                            url_store[url] = response;
+                            deferred.resolve(response);
+                        }
+                    });
+            }
         } else {
             deferred.reject(undefined);
         }
@@ -206,7 +214,7 @@ GOVUK.Insights.TwitterCollector = function () {
     }
 
     var init_search = function () {
-        start_search(function(){
+        start_search(function () {
             setTimeout(init_search, SEARCH_TIMEOUT);
         });
     }
