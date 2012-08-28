@@ -4,6 +4,7 @@ var Q = require("q");
 var fs = require("fs");
 var _ = require('underscore');
 var amqp = require('amqp');
+var dateFormat = require('dateformat');
 var $log = require('nlogger').logger(module);
 
 var GOVUK = GOVUK || {};
@@ -15,6 +16,7 @@ GOVUK.Insights.TwitterCollector = function () {
     const MAX_PAGE = 10;
     const SEARCH_TERM = 'gov.uk';
     const STREAM_TRACK = 'govuk';
+    const STREAM_FOLLOW = '460116600,268349503,771955915';
     const SEARCH_TIMEOUT = 2 * 60 * 1000;
 
     var twitter = undefined;
@@ -69,7 +71,7 @@ GOVUK.Insights.TwitterCollector = function () {
 
     function create_message(payload) {
         return {envelope:{
-            collected_at:new Date(),
+            collected_at: format_date(new Date()),
             collector:"Twitter (NodeJS)"
         },
             payload:payload
@@ -101,7 +103,7 @@ GOVUK.Insights.TwitterCollector = function () {
             text:tweet.text,
             geo:tweet.geo,
             coordinates:tweet.coordinates,
-            time:Date.parse(tweet.created_at),
+            time: extract_date(tweet.created_at),
             mentions:tweet.entities.user_mentions.map(function (user_mention) {
                 return user_mention.screen_name;
             }),
@@ -118,6 +120,17 @@ GOVUK.Insights.TwitterCollector = function () {
             callback(payload);
         })
     };
+
+    var format_date = function(date) {
+        return dateFormat(date, "yyyy-mm-dd'T'HH:MM:sso");
+    }
+
+    var extract_date= function(date_from_twitter){
+        var unixtime = Date.parse(date_from_twitter);
+        var date = new Date(unixtime);
+
+        return format_date(date);
+    }
 
     var extract_urls_and_paths = function (entities, callback) {
         var response_promises = entities.urls.map(function (url) {
@@ -172,7 +185,8 @@ GOVUK.Insights.TwitterCollector = function () {
         params = _.extend({result_type:'recent', rpp:100, include_entities:true}, params)
         twitter.search(SEARCH_TERM, params, function (err, data) {
             if (err) {
-                $log.error("An error occured searching for tweets: " + err)
+                $log.error("An error occured searching for tweets: " + err);
+                callback({});
             } else {
                 $log.info("Executed search: {}, results: {}", params, data.results.length);
                 callback(data);
@@ -221,7 +235,7 @@ GOVUK.Insights.TwitterCollector = function () {
 
     var init_stream = function () {
         $log.info("Starting twitter stream ...");
-        twitter.stream('statuses/filter', {'track':STREAM_TRACK}, function (stream) {
+        twitter.stream('statuses/filter', {'track':STREAM_TRACK, 'follow': STREAM_FOLLOW}, function (stream) {
             stream.on('data', function (tweet) {
                 process_stream_tweet(tweet)
             })
