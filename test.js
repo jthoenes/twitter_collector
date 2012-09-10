@@ -1,11 +1,22 @@
-var dateFormat = require('dateformat');
+var short_url = "http://www.northampton.gov.uk/downloads/file/5060/northampton_hod_2012_pdf";
+var long_url = short_url;
 
-function extract_date(date_from_twitter){
-    var unixtime = Date.parse(date_from_twitter);
-    var date = new Date(unixtime);
+var redis = require("redis");
+var $log = require('nlogger').logger(module);
 
-    return dateFormat(date, "yyyy-mm-dd'T'HH:MM:sso");
+var reddis_client = undefined;
+
+var reddis_connect = function () {
+    reddis_client = redis.createClient();
+
+    reddis_client.on("error", function (err) {
+        $log.error("Error in connecting to Reddis: " + err);
+    });
 }
 
-var source_date = "Tue Aug 28 19:08:56 +0000 2012";
-console.log(extract_date(source_date))
+reddis_connect();
+
+reddis_client.hset("urls", short_url, long_url);
+reddis_client.hget("urls", short_url, function(err, result){
+   $log.warn(result);
+});

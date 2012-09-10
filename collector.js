@@ -1,28 +1,57 @@
 var ntwitter = require('ntwitter');
 var request = require("request");
 var Q = require("q");
-var fs = require("fs");
 var _ = require('underscore');
 var amqp = require('amqp');
 var dateFormat = require('dateformat');
 var $log = require('nlogger').logger(module);
+var redis = require("redis");
+var url = require('url');
 
 var GOVUK = GOVUK || {};
 GOVUK.Insights = GOVUK.Insights || {};
 GOVUK.Insights.TwitterCollector = function () {
 
-    const GOVUK_HOSTS = ["www.gov.uk", "gov.uk"];
-    const SINCE_ID_FILE = "./tweets/_govuk_twitter_collector_search_since_id";
-    const MAX_PAGE = 10;
+    const GOVUK_HOSTS = [
+        // -- GOV.UK
+        "gov.uk",
+        "www.gov.uk",
+        // -- Direct GOV
+        "direct.gov.uk",
+        "www.direct.gov.uk",
+        "jobseekers.direct.gov.uk",
+        "taxdisc.direct.gov.uk",
+        "epetitions.direct.gov.uk",
+        "studentfinance.direct.gov.uk",
+        "local.direct.gov.uk",
+        "dvlaregistrations.direct.gov.uk",
+        "motinfo.direct.gov.uk",
+        "dwp-services.direct.gov.uk",
+        "monitoring.direct.gov.uk",
+        // -- Business Link
+        'businesslink.gov.uk',
+        'www.businesslink.gov.uk',
+        'online.businesslink.gov.uk',
+        'contractfinder.businesslink.gov.uk',
+        'improve.businesslink.gov.uk',
+        'edon.businesslink.gov.uk',
+        'tariff.businesslink.gov.uk',
+        'events.businesslink.gov.uk',
+        'elearning.businesslink.gov.uk',
+        'ukwelcome.businesslink.gov.uk'
+    ];
+    const MAX_PAGE = 20;
     const SEARCH_TERM = 'gov.uk';
     const STREAM_TRACK = 'govuk';
     const STREAM_FOLLOW = '460116600,268349503,771955915';
     const SEARCH_TIMEOUT = 2 * 60 * 1000;
+    const URL_HASHSET = "short_urls";
+    const KEY_SINCE_ID = "govuk_twitter_since_id";
 
     var twitter = undefined;
     var amqp_exchange = undefined;
     var amqp_connection = undefined;
-    var url_store = {};
+    var redis_client = undefined;
 
     var create_twitter = function () {
         $log.debug("Connecting to Twitter ...");
@@ -55,7 +84,24 @@ GOVUK.Insights.TwitterCollector = function () {
 
         });
         return deferred.promise;
-    }
+    };
+
+    var create_redis = function () {
+        $log.debug("Connecting to Redis ...");
+        var _redis_client = redis.createClient();
+
+        var deferred = Q.defer();
+        _redis_client.on("ready", function () {
+            redis_client = _redis_client;
+            deferred.resolve(true);
+            $log.debug("Connected to Redis");
+        });
+        _redis_client.on("error", function (err) {
+            deferred.reject(err);
+            $log.error("Error in connecting to Reddis: " + err);
+        });
+        return deferred.promise;
+    };
 
     var publish = function (amqp_topic, message) {
         $log.debug("Publish tweet {} to {}", message.payload.tweet_id, amqp_topic);
@@ -69,9 +115,9 @@ GOVUK.Insights.TwitterCollector = function () {
         });
     };
 
-    function create_message(payload) {
+    var create_message = function(payload) {
         return {envelope:{
-            collected_at: format_date(new Date()),
+            collected_at:format_date(new Date()),
             collector:"Twitter (NodeJS)"
         },
             payload:payload
@@ -79,7 +125,6 @@ GOVUK.Insights.TwitterCollector = function () {
     }
 
     var process_search_tweet = function (tweet) {
-        $log.trace(tweet);
         extract_payload('twitter_search', tweet, function (payload) {
             $log.debug("Handling search tweet {}", payload.tweet_id);
             $log.trace(payload);
@@ -103,7 +148,7 @@ GOVUK.Insights.TwitterCollector = function () {
             text:tweet.text,
             geo:tweet.geo,
             coordinates:tweet.coordinates,
-            time: extract_date(tweet.created_at),
+            time:extract_date(tweet.created_at),
             mentions:tweet.entities.user_mentions.map(function (user_mention) {
                 return user_mention.screen_name;
             }),
@@ -121,11 +166,11 @@ GOVUK.Insights.TwitterCollector = function () {
         })
     };
 
-    var format_date = function(date) {
+    var format_date = function (date) {
         return dateFormat(date, "yyyy-mm-dd'T'HH:MM:sso");
     }
 
-    var extract_date= function(date_from_twitter){
+    var extract_date = function (date_from_twitter) {
         var unixtime = Date.parse(date_from_twitter);
         var date = new Date(unixtime);
 
@@ -136,44 +181,47 @@ GOVUK.Insights.TwitterCollector = function () {
         var response_promises = entities.urls.map(function (url) {
             return url.expanded_url
         }).map(resolve_url);
-        Q.all(response_promises).then(function (responses) {
-            resolved_urls = responses.map(function (r) {
-                return r.request.href
+        Q.all(response_promises).then(function (full_urls) {
+            resolved_urls = full_urls.map(function (full_url) {
+                return full_url;
             });
-            paths = extract_govuk_paths(responses);
-            callback(resolved_urls, paths)
+            paths = extract_govuk_paths(full_urls);
+            callback(resolved_urls, paths);
         });
     };
 
-    var extract_govuk_paths = function (responses) {
-        return _.reject(responses.map(function (response) {
-            var uri = response.request.uri;
-            if (_.include(GOVUK_HOSTS, uri.host)) {
-                return uri.path;
+    var extract_govuk_paths = function (urls) {
+        return _.reject(urls.map(function (url_str) {
+            var uri = url.parse(url_str);
+            if (_.include(GOVUK_HOSTS, uri.hostname)) {
+                return uri.pathname;
             }
         }), function (path) {
             return path == undefined
         });
     }
 
-    var resolve_url = function (url) {
+    var resolve_url = function (source_url) {
         var deferred = Q.defer();
-        if (url != null) {
-            if (url_store[url]) {
-                $log.debug("Using cache for {}.", url);
-                deferred.resolve(url_store[url]);
-            } else {
-                $log.debug("Loading {} from server.", url);
-                request({ method:"HEAD", url:url, followAllRedirects:true },
-                    function (error, response) {
-                        if (error) {
-                            deferred.reject(undefined);
-                        } else {
-                            url_store[url] = response;
-                            deferred.resolve(response);
-                        }
-                    });
-            }
+        if (source_url != null) {
+            redis_client.hget(URL_HASHSET, source_url, function (err, full_url) {
+                if (full_url) {
+                    $log.debug("Using cache for {} -> {}.", source_url, full_url);
+                    deferred.resolve(full_url);
+                } else {
+                    $log.debug("Loading {} from server.", source_url);
+                    request({ method:"HEAD", url:source_url, followAllRedirects:true },
+                        function (error, response) {
+                            if (error) {
+                                deferred.reject(undefined);
+                            } else {
+                                var full_url = response.request.href;
+                                redis_client.hset(URL_HASHSET, source_url, full_url);
+                                deferred.resolve(full_url);
+                            }
+                        });
+                }
+            });
         } else {
             deferred.reject(undefined);
         }
@@ -195,35 +243,46 @@ GOVUK.Insights.TwitterCollector = function () {
     }
 
     var handle_first_search_result = function (data, since_id) {
-        data.results.forEach(process_search_tweet);
+        if (data && data.results) {
 
-        if (data.results.length == data.results_per_page) {
-            execute_search({page:2, max_id:since_id}, handle_next_search_result)
+            data.results.forEach(process_search_tweet);
+
+            if (data.results.length >= (data.results_per_page - 10)) {
+                execute_search({page:2, max_id:since_id}, handle_next_search_result)
+            }
+        } else {
+            $log.warn("Unprocessable search result: {}", data);
         }
     }
 
     var handle_next_search_result = function (data) {
-        data.results.forEach(process_search_tweet);
+        if (data && data.results) {
+            data.results.forEach(process_search_tweet);
 
-        if (data.results.length != 0) {
-            var page = data.page + 1
-            if (page <= MAX_PAGE) {
-                execute_search({page:page, max_id:data.max_id}, handle_next_search_result)
+            if (data.results.length != 0) {
+                var page = data.page + 1;
+                if (page <= MAX_PAGE) {
+                    execute_search({page:page, max_id:data.max_id}, handle_next_search_result)
+                }
             }
+        } else {
+            $log.warn("Unprocessable search result: {}", data);
         }
     }
 
     var start_search = function (callback) {
-        $log.info("Starting search ...")
-        since_id = parseInt(fs.readFileSync(SINCE_ID_FILE)) || 0;
-        execute_search({since_id:since_id}, function (data) {
+        $log.info("Starting search ...");
+        redis_client.get(KEY_SINCE_ID, function (err, since_id) {
+            since_id = since_id || 0;
+            execute_search({since_id:since_id}, function (data) {
 
-            handle_first_search_result(data, since_id);
+                handle_first_search_result(data, since_id);
 
-            since_id = data.max_id_str;
-            fs.writeFileSync(SINCE_ID_FILE, since_id);
+                since_id = data.max_id_str;
+                redis_client.set(KEY_SINCE_ID, since_id);
 
-            callback();
+                callback();
+            });
         });
     }
 
@@ -235,7 +294,7 @@ GOVUK.Insights.TwitterCollector = function () {
 
     var init_stream = function () {
         $log.info("Starting twitter stream ...");
-        twitter.stream('statuses/filter', {'track':STREAM_TRACK, 'follow': STREAM_FOLLOW}, function (stream) {
+        twitter.stream('statuses/filter', {'track':STREAM_TRACK, 'follow':STREAM_FOLLOW}, function (stream) {
             stream.on('data', function (tweet) {
                 process_stream_tweet(tweet)
             })
@@ -244,7 +303,7 @@ GOVUK.Insights.TwitterCollector = function () {
     };
 
     this.start = function () {
-        Q.all([create_twitter(), create_amqp()]).then(function (args) {
+        Q.all([create_twitter(), create_amqp(), create_redis()]).then(function (args) {
             $log.info("Started Twitter & AMQP connection.");
             init_stream();
             init_search();
@@ -254,6 +313,9 @@ GOVUK.Insights.TwitterCollector = function () {
     this.stop = function () {
         if (amqp_connection) {
             amqp_connection.end();
+        }
+        if (redis_client) {
+            redis_client.quit();
         }
     };
 
